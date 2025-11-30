@@ -1,0 +1,18 @@
+{
+  "name": "dota-discord-bot",
+  "version": "1.0.0",
+  "description": "Bot do Discord para monitorar partidas do Dota 2",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["discord", "bot", "dota2"],
+  "author": "",
+  "license": "MIT"
+}
