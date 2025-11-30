@@ -1,4 +1,7 @@
 const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
 require("dotenv").config();
 
 // Configurações via .env
@@ -6,10 +9,11 @@ const CONFIG = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   CHANNEL_ID: process.env.CHANNEL_ID,
   PLAYER_ID: process.env.PLAYER_ID,
-  CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL || 15 * 60 * 1000), // default 15 min
+  CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL) || 900000, 
   TEST_MODE: String(process.env.TEST_MODE || "false").toLowerCase() === "true",
   TEST_MATCH_ID: process.env.TEST_MATCH_ID || null,
-  LATEST_MATCH: process.env.LATEST_MATCH || null,
+  FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 10000),
+  HEALTH_CHECK_PORT: Number(process.env.HEALTH_CHECK_PORT || 3000),
 };
 
 // Cliente Discord
@@ -17,37 +21,121 @@ const client = new Client({
 	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
-// Armazena o ID da última partida verificada, inicializando com o .env
-let lastMatchId = CONFIG.LATEST_MATCH ? String(CONFIG.LATEST_MATCH) : null;
+// Estado persistente
+const STATE_FILE = path.resolve(__dirname, "bot-state.json");
+
+function loadState() {
+	if (!fs.existsSync(STATE_FILE)) {
+		return { lastMatchId: null };
+	}
+	try {
+		return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+	} catch (e) {
+		console.error("⚠️ Erro ao ler estado, iniciando limpo:", e.message);
+		return { lastMatchId: null };
+	}
+}
+
+function saveState(state) {
+	try {
+		fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+		console.log(`💾 Estado salvo: lastMatchId=${state.lastMatchId}`);
+	} catch (e) {
+		console.error("❌ Erro ao salvar estado:", e.message);
+	}
+}
+
+let state = loadState();
+let lastMatchId = state.lastMatchId;
+let isChecking = false;
+let rateLimitWaitTimeout = null;
+
+// Utilidades para fetch com retry/timeout
+function delay(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function safeFetchJson(url, options = {}, { retries = 3, backoffMs = 1000 } = {}) {
+	for (let attempt = 1; attempt <= retries; attempt++) {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT_MS);
+		try {
+			const res = await fetch(url, { ...options, signal: controller.signal });
+			clearTimeout(timeout);
+			if (!res.ok) {
+				let body;
+				try {
+					body = await res.json();
+				} catch (_) {
+					body = await res.text();
+				}
+				return { error: `http ${res.status}`, details: body };
+			}
+			return res.json();
+		} catch (err) {
+			clearTimeout(timeout);
+			const finalAttempt = attempt === retries;
+			console.error(`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`, err?.message || err);
+			if (finalAttempt) {
+				console.error("⛔ Erro persistente ao acessar a API.");
+				return { error: "network_error", details: err?.message };
+			}
+			await delay(backoffMs * attempt);
+		}
+	}
+}
 
 // Função para buscar matches do jogador
 async function fetchPlayerMatches(limit = 1) {
 	const url = `https://api.opendota.com/api/players/${CONFIG.PLAYER_ID}/matches?limit=${limit}`;
-	const response = await fetch(url);
-	return response.json();
+	const retries = 3;
+	for (let attempt = 1; attempt <= retries; attempt++) {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT_MS);
+		try {
+			const res = await fetch(url, { signal: controller.signal });
+			clearTimeout(timeout);
+			const headersObj = {};
+			try {
+				res.headers.forEach((value, key) => {
+					headersObj[key.toLowerCase()] = value;
+				});
+			} catch (_) {}
+			if (!res.ok) {
+				let body;
+				try { body = await res.json(); } catch (_) { body = await res.text(); }
+				const errorMsg = (body && body.error) ? body.error : `http ${res.status}`;
+				return { data: null, error: errorMsg, details: body, headers: headersObj, status: res.status };
+			}
+			const data = await res.json();
+			return { data, headers: headersObj, status: res.status };
+		} catch (err) {
+			clearTimeout(timeout);
+			console.error(`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`, err?.message || err);
+			if (attempt === retries) {
+				console.error("⛔ Erro persistente ao acessar a API.");
+				return { data: null, error: "network_error", details: err?.message };
+			}
+			await delay(1000 * attempt);
+		}
+	}
 }
 
 // Função para buscar detalhes completos de uma match
 async function fetchMatchDetails(matchId) {
-	const response = await fetch(
-		`https://api.opendota.com/api/matches/${matchId}`
-	);
-	return response.json();
+	return safeFetchJson(`https://api.opendota.com/api/matches/${matchId}`);
 }
 
 // Função para buscar lista de heróis
 async function fetchHeroes() {
-	const response = await fetch("https://api.opendota.com/api/heroes");
-	return response.json();
+	return safeFetchJson("https://api.opendota.com/api/heroes");
 }
 
 // Função para buscar dados de itens
 async function fetchItemData() {
 	const [itemIds, items] = await Promise.all([
-		fetch("https://api.opendota.com/api/constants/item_ids").then((r) =>
-			r.json()
-		),
-		fetch("https://api.opendota.com/api/constants/items").then((r) => r.json()),
+		safeFetchJson("https://api.opendota.com/api/constants/item_ids"),
+		safeFetchJson("https://api.opendota.com/api/constants/items"),
 	]);
 	return { itemIds, items };
 }
@@ -162,8 +250,21 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 	return embed;
 }
 
+// Função para calcular tempo até próximo reset (midnight UTC)
+function calculateTimeUntilReset() {
+	const now = new Date();
+	const nextMidnight = new Date(now);
+	nextMidnight.setUTCHours(24, 0, 0, 0);
+	return nextMidnight - now;
+}
+
 // Função principal de verificação
 async function checkForNewMatches() {
+	if (isChecking) {
+		console.log("⏳ Verificação anterior ainda em andamento. Aguardando próxima janela.");
+		return;
+	}
+	isChecking = true;
 	try {
 		console.log("🔍 Verificando novas partidas...");
 
@@ -173,6 +274,12 @@ async function checkForNewMatches() {
 				`🧪 MODO TESTE: Testando com match ID: ${CONFIG.TEST_MATCH_ID}`
 			);
 			const matchDetails = await fetchMatchDetails(CONFIG.TEST_MATCH_ID);
+			
+			if (matchDetails.error) {
+				console.error("❌ Erro ao buscar match de teste:", matchDetails.error);
+				return;
+			}
+			
 			const heroes = await fetchHeroes();
 
 			const playerData = matchDetails.players.find(
@@ -193,34 +300,82 @@ async function checkForNewMatches() {
 			return;
 		}
 
-		const matches = await fetchPlayerMatches(1);
+		const { data: matches, headers: respHeaders, status: respStatus, error: respError } = await fetchPlayerMatches(1);
 
-		if (!matches || matches.length === 0) {
+		// Loga headers relevantes (rate limit)
+		if (respHeaders) {
+			const remaining = {
+				minute: respHeaders['x-rate-limit-remaining-minute'],
+				day: respHeaders['x-rate-limit-remaining-day']
+			};
+			console.log(`📊 Rate limits - Minuto: ${remaining.minute || '?'}/60 | Dia: ${remaining.day || '?'}`);
+			
+			// Warning se está chegando no limite
+			if (remaining.day && Number(remaining.day) < 100 && Number(remaining.day) > 0) {
+				console.warn(`⚠️ Aviso: Apenas ${remaining.day} requisições restantes hoje!`);
+			}
+		}
+
+		// Verifica erro de limite diário/ratelimit
+		if (respError) {
+			console.error(`❌ Erro da API OpenDota: ${respError}`);
+			if (String(respError).toLowerCase().includes("daily api limit exceeded") || respStatus === 429) {
+				const waitMs = calculateTimeUntilReset();
+				const nextMidnight = new Date(Date.now() + waitMs);
+				
+				console.log(`⏰ Rate limited. Aguardando até ${nextMidnight.toLocaleString('pt-BR')} (~${Math.round(waitMs/60000)} minutos)`);
+				
+				// Cancela timeout anterior se existir
+				if (rateLimitWaitTimeout) {
+					clearTimeout(rateLimitWaitTimeout);
+				}
+				
+				// Aguarda até o reset e libera o lock
+				rateLimitWaitTimeout = setTimeout(() => {
+					console.log("🔄 Retomando verificações após reset do rate limit");
+					isChecking = false;
+					rateLimitWaitTimeout = null;
+					// Força uma verificação imediata após o reset
+					checkForNewMatches();
+				}, waitMs);
+				
+				return; // Não libera isChecking aqui, será liberado pelo timeout
+			}
+			isChecking = false; // Libera para outros erros
+			return;
+		}
+
+		if (!Array.isArray(matches) || matches.length === 0) {
 			console.log("❌ Nenhuma partida encontrada");
 			return;
 		}
 
 		const latestMatch = matches[0];
-
-		// Normaliza IDs para string
 		const latestId = String(latestMatch.match_id);
 
-		// Se é a primeira verificação e não há LATEST_MATCH no .env, inicializa e persiste
+		// Se é a primeira verificação, inicializa
 		if (lastMatchId === null) {
 			lastMatchId = latestId;
+			state.lastMatchId = latestId;
+			saveState(state);
 			console.log(`✅ Inicializado com match ID: ${lastMatchId}`);
-			await persistLatestMatch(lastMatchId);
 
 			// Modo teste: envia a última partida mesmo sendo a primeira verificação
 			if (!CONFIG.TEST_MODE) return;
 		}
 
-		// Verifica se há nova partida comparando com .env/estado atual
+		// Verifica se há nova partida
 		if (latestId !== lastMatchId || CONFIG.TEST_MODE) {
 			console.log(`🆕 Nova partida detectada: ${latestMatch.match_id}`);
 
 			// Busca detalhes completos
 			const matchDetails = await fetchMatchDetails(latestMatch.match_id);
+			
+			if (matchDetails.error) {
+				console.error("❌ Erro ao buscar detalhes da partida:", matchDetails.error);
+				return;
+			}
+			
 			const heroes = await fetchHeroes();
 
 			// Encontra os dados do jogador
@@ -240,7 +395,8 @@ async function checkForNewMatches() {
 
 			// Atualiza e persiste última partida
 			lastMatchId = latestId;
-			await persistLatestMatch(lastMatchId);
+			state.lastMatchId = latestId;
+			saveState(state);
 			console.log("✅ Notificação enviada com sucesso!");
 
 			// Desativa TEST_MODE após enviar
@@ -253,19 +409,76 @@ async function checkForNewMatches() {
 		}
 	} catch (error) {
 		console.error("❌ Erro ao verificar partidas:", error);
+	} finally {
+		// Só libera se não estamos aguardando rate limit reset
+		if (!rateLimitWaitTimeout) {
+			isChecking = false;
+		}
 	}
 }
 
-// Eventos do Discord (usa apenas 'ready' para evitar duplicação)
-client.once("ready", () => {
+// Status check endpoint (avoiding conflict with OpenDota's /health)
+const statusServer = http.createServer(async (req, res) => {
+	if (req.url === '/status') {
+		// Check OpenDota API health
+		let opendotaHealth = { status: 'unknown' };
+		try {
+			const healthRes = await fetch('https://api.opendota.com/api/health', {
+				signal: AbortSignal.timeout(5000)
+			});
+			opendotaHealth = await healthRes.json();
+		} catch (e) {
+			opendotaHealth = { status: 'error', error: e.message };
+		}
+
+		res.writeHead(200, { 'Content-Type': 'application/json' });
+		res.end(JSON.stringify({
+			bot: {
+				status: 'ok',
+				connected: client.isReady(),
+				lastCheck: new Date().toISOString(),
+				lastMatchId: lastMatchId,
+				isChecking: isChecking,
+				waitingForRateLimit: !!rateLimitWaitTimeout
+			},
+			opendota: opendotaHealth
+		}, null, 2));
+	} else {
+		res.writeHead(404);
+		res.end('Not Found');
+	}
+});
+
+statusServer.listen(CONFIG.HEALTH_CHECK_PORT, () => {
+	console.log(`📊 Status check disponível em http://localhost:${CONFIG.HEALTH_CHECK_PORT}/status`);
+});
+
+// Eventos do Discord
+client.once("ready", async () => {
 	console.log(`✅ Bot conectado como ${client.user.tag}`);
 	console.log(`👀 Monitorando jogador ID: ${CONFIG.PLAYER_ID}`);
+	console.log(`⏱️ Intervalo de verificação: ${CONFIG.CHECK_INTERVAL / 60000} minutos`);
 
-	// Se TEST_MATCH_ID estiver definido, só roda uma vez
 	if (CONFIG.TEST_MATCH_ID) {
 		console.log("🧪 Modo de teste com match específico - executando uma vez");
 		checkForNewMatches();
 		return;
+	}
+
+	// Testa acesso à API antes de iniciar verificações
+	console.log("🔍 Testando acesso à API OpenDota...");
+	const testResult = await fetchPlayerMatches(1);
+	
+	if (testResult.error) {
+		console.error("❌ API inacessível no startup.");
+		if (testResult.status === 429) {
+			console.error("⛔ Rate limit ativo. O bot aguardará automaticamente o reset.");
+			// Inicia mesmo com rate limit, a função checkForNewMatches vai lidar com isso
+		} else {
+			console.error("⚠️ Continuando mesmo com erro. Tentativas futuras podem funcionar.");
+		}
+	} else {
+		console.log("✅ API acessível!");
 	}
 
 	// Inicia verificação periódica
@@ -277,48 +490,26 @@ client.on("error", (error) => {
 	console.error("❌ Erro no cliente Discord:", error);
 });
 
-// Persistência do LATEST_MATCH no arquivo .env
-const fs = require("fs");
-const path = require("path");
-const ENV_PATH = path.resolve(__dirname, ".env");
-
-function writeEnv(updated) {
-	const entries = Object.entries(updated)
-		.filter(([, v]) => v !== undefined && v !== null)
-		.map(([k, v]) => `${k}=${v}`);
-	fs.writeFileSync(ENV_PATH, entries.join("\n"), { encoding: "utf8" });
-}
-
-function parseEnvFile(content) {
-	const out = {};
-	for (const line of content.split(/\r?\n/)) {
-		if (!line || line.trim().startsWith("#")) continue;
-		const idx = line.indexOf("=");
-		if (idx === -1) continue;
-		const key = line.slice(0, idx).trim();
-		const val = line.slice(idx + 1);
-		out[key] = val;
+// Graceful shutdown
+process.on('SIGINT', () => {
+	console.log('\n🛑 Encerrando bot...');
+	if (rateLimitWaitTimeout) {
+		clearTimeout(rateLimitWaitTimeout);
 	}
-	return out;
-}
+	statusServer.close();
+	client.destroy();
+	process.exit(0);
+});
 
-async function persistLatestMatch(latest) {
-	try {
-		let current = {};
-		if (fs.existsSync(ENV_PATH)) {
-			const content = fs.readFileSync(ENV_PATH, "utf8");
-			current = parseEnvFile(content);
-		}
-		if (current.LATEST_MATCH === String(latest)) return; // nothing to do
-		current.LATEST_MATCH = String(latest);
-		writeEnv({
-			...current,
-		});
-		console.log(`📝 LATEST_MATCH atualizado no .env: ${latest}`);
-	} catch (e) {
-		console.error("❌ Falha ao persistir LATEST_MATCH no .env:", e);
+process.on('SIGTERM', () => {
+	console.log('\n🛑 Encerrando bot...');
+	if (rateLimitWaitTimeout) {
+		clearTimeout(rateLimitWaitTimeout);
 	}
-}
+	healthServer.close();
+	client.destroy();
+	process.exit(0);
+});
 
 // Inicia o bot
 client.login(CONFIG.DISCORD_TOKEN);
