@@ -28,7 +28,6 @@ function loadState() {
 	if (!fs.existsSync(STATE_FILE)) {
 		return {
 			lastMatchId: null,
-			lowPriorityCount: 0,
 			lastGameMode: null,
 			bestLowPriorityStreak: 0,
 			currentLowPriorityStreak: 0,
@@ -36,7 +35,6 @@ function loadState() {
 	}
 	try {
 		const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-		if (state.lowPriorityCount === undefined) state.lowPriorityCount = 0;
 		if (state.lastGameMode === undefined) state.lastGameMode = null;
 		if (state.bestLowPriorityStreak === undefined)
 			state.bestLowPriorityStreak = 0;
@@ -47,7 +45,6 @@ function loadState() {
 		console.error("⚠️ Erro ao ler estado, iniciando limpo:", e.message);
 		return {
 			lastMatchId: null,
-			lowPriorityCount: 0,
 			lastGameMode: null,
 			bestLowPriorityStreak: 0,
 			currentLowPriorityStreak: 0,
@@ -59,7 +56,7 @@ function saveState(state) {
 	try {
 		fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
 		console.log(
-			`💾 Estado salvo: lastMatchId=${state.lastMatchId}, lowPriorityCount=${state.lowPriorityCount}, bestStreak=${state.bestLowPriorityStreak}, currentStreak=${state.currentLowPriorityStreak}`
+			`💾 Estado salvo: lastMatchId=${state.lastMatchId}, bestStreak=${state.bestLowPriorityStreak}, currentStreak=${state.currentLowPriorityStreak}`
 		);
 	} catch (e) {
 		console.error("❌ Erro ao salvar estado:", e.message);
@@ -178,7 +175,7 @@ async function fetchMatchDetails(matchId) {
 
 // Função para buscar lista de heróis
 async function fetchHeroes() {
-	return safeFetchJson("https://api.opendota.com/api/heroes");
+	return safeFetchJson("https://api.opendota.com/api/constants/heroes");
 }
 
 // Função para buscar dados de itens
@@ -290,7 +287,7 @@ function getLowPriorityStatus(currentGameMode, previousGameMode) {
 
 // Função para criar embed da partida
 async function createMatchEmbed(matchDetails, playerData, heroes) {
-	const hero = heroes.find((h) => h.id === playerData.hero_id);
+	const hero = heroes[playerData.hero_id]
 	const { itemIds, items } = await fetchItemData();
 	const { invItems, backpackItems, quebrouItens } = getReadableInventory(
 		playerData,
@@ -354,6 +351,40 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 		});
 	}
 
+	// Adiciona título de Low Priority se estiver na low e não houver mensagem específica
+	if (showStreaks && !statusMessage) {
+		embed.addFields({
+			name: "⚠️ Low Priority",
+			value: "\u200B",
+			inline: false,
+		});
+	}
+
+	// Só mostra streaks se estiver na low
+	if (showStreaks) {
+		embed.addFields(
+			{
+				name: `Melhor low streak: ${state.bestLowPriorityStreak}`,
+				value: "\u200B",
+				inline: true,
+			},
+			{
+				name: `Low streak atual: ${state.currentLowPriorityStreak}`,
+				value: "\u200B",
+				inline: true,
+			}
+		);
+	}
+
+	// Mostra mensagem de novo recorde se houver
+	if (newRecordMessage) {
+		embed.addFields({
+			name: newRecordMessage,
+			value: "\u200B",
+			inline: false,
+		});
+	}
+
 	if (invItems.length > 0) {
 		embed.addFields({
 			name: "🎒 Inventário",
@@ -376,22 +407,6 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 			value: "**Quebrou/vendeu todos os itens KKKKK**",
 			inline: false,
 		});
-	}
-
-	// Só mostra streaks se estiver na low
-	if (showStreaks) {
-		embed.addFields(
-			{
-				name: `Melhor low streak: ${state.bestLowPriorityStreak}`,
-				value: "\u200B",
-				inline: true,
-			},
-			{
-				name: `Low streak atual: ${state.currentLowPriorityStreak}`,
-				value: "\u200B",
-				inline: true,
-			}
-		);
 	}
 
 	embed.setTimestamp(new Date(matchDetails.start_time * 1000));
