@@ -6,14 +6,14 @@ require("dotenv").config();
 
 // Configurações via .env
 const CONFIG = {
-  DISCORD_TOKEN: process.env.DISCORD_TOKEN,
-  CHANNEL_ID: process.env.CHANNEL_ID,
-  PLAYER_ID: process.env.PLAYER_ID,
-  CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL) || 900000, 
-  TEST_MODE: String(process.env.TEST_MODE || "false").toLowerCase() === "true",
-  TEST_MATCH_ID: process.env.TEST_MATCH_ID || null,
-  FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 10000),
-  HEALTH_CHECK_PORT: Number(process.env.HEALTH_CHECK_PORT || 3000),
+	DISCORD_TOKEN: process.env.DISCORD_TOKEN,
+	CHANNEL_ID: process.env.CHANNEL_ID,
+	PLAYER_ID: process.env.PLAYER_ID,
+	CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL) || 900000,
+	TEST_MODE: String(process.env.TEST_MODE || "false").toLowerCase() === "true",
+	TEST_MATCH_ID: process.env.TEST_MATCH_ID || null,
+	FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 10000),
+	HEALTH_CHECK_PORT: Number(process.env.HEALTH_CHECK_PORT || 3001),
 };
 
 // Cliente Discord
@@ -26,24 +26,31 @@ const STATE_FILE = path.resolve(__dirname, "bot-state.json");
 
 function loadState() {
 	if (!fs.existsSync(STATE_FILE)) {
-		return { 
+		return {
 			lastMatchId: null,
 			lowPriorityCount: 0,
-			lastGameMode: null
+			lastGameMode: null,
+			bestLowPriorityStreak: 0,
+			currentLowPriorityStreak: 0,
 		};
 	}
 	try {
 		const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-		// Garante que os novos campos existam mesmo em estados antigos
 		if (state.lowPriorityCount === undefined) state.lowPriorityCount = 0;
 		if (state.lastGameMode === undefined) state.lastGameMode = null;
+		if (state.bestLowPriorityStreak === undefined)
+			state.bestLowPriorityStreak = 0;
+		if (state.currentLowPriorityStreak === undefined)
+			state.currentLowPriorityStreak = 0;
 		return state;
 	} catch (e) {
 		console.error("⚠️ Erro ao ler estado, iniciando limpo:", e.message);
-		return { 
+		return {
 			lastMatchId: null,
 			lowPriorityCount: 0,
-			lastGameMode: null
+			lastGameMode: null,
+			bestLowPriorityStreak: 0,
+			currentLowPriorityStreak: 0,
 		};
 	}
 }
@@ -51,7 +58,9 @@ function loadState() {
 function saveState(state) {
 	try {
 		fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-		console.log(`💾 Estado salvo: lastMatchId=${state.lastMatchId}, lowPriorityCount=${state.lowPriorityCount}, lastGameMode=${state.lastGameMode}`);
+		console.log(
+			`💾 Estado salvo: lastMatchId=${state.lastMatchId}, lowPriorityCount=${state.lowPriorityCount}, bestStreak=${state.bestLowPriorityStreak}, currentStreak=${state.currentLowPriorityStreak}`
+		);
 	} catch (e) {
 		console.error("❌ Erro ao salvar estado:", e.message);
 	}
@@ -70,10 +79,17 @@ function delay(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function safeFetchJson(url, options = {}, { retries = 3, backoffMs = 1000 } = {}) {
+async function safeFetchJson(
+	url,
+	options = {},
+	{ retries = 3, backoffMs = 1000 } = {}
+) {
 	for (let attempt = 1; attempt <= retries; attempt++) {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT_MS);
+		const timeout = setTimeout(
+			() => controller.abort(),
+			CONFIG.FETCH_TIMEOUT_MS
+		);
 		try {
 			const res = await fetch(url, { ...options, signal: controller.signal });
 			clearTimeout(timeout);
@@ -90,7 +106,10 @@ async function safeFetchJson(url, options = {}, { retries = 3, backoffMs = 1000 
 		} catch (err) {
 			clearTimeout(timeout);
 			const finalAttempt = attempt === retries;
-			console.error(`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`, err?.message || err);
+			console.error(
+				`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`,
+				err?.message || err
+			);
 			if (finalAttempt) {
 				console.error("⛔ Erro persistente ao acessar a API.");
 				return { error: "network_error", details: err?.message };
@@ -106,7 +125,10 @@ async function fetchPlayerMatches(limit = 1) {
 	const retries = 3;
 	for (let attempt = 1; attempt <= retries; attempt++) {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT_MS);
+		const timeout = setTimeout(
+			() => controller.abort(),
+			CONFIG.FETCH_TIMEOUT_MS
+		);
 		try {
 			const res = await fetch(url, { signal: controller.signal });
 			clearTimeout(timeout);
@@ -118,15 +140,28 @@ async function fetchPlayerMatches(limit = 1) {
 			} catch (_) {}
 			if (!res.ok) {
 				let body;
-				try { body = await res.json(); } catch (_) { body = await res.text(); }
-				const errorMsg = (body && body.error) ? body.error : `http ${res.status}`;
-				return { data: null, error: errorMsg, details: body, headers: headersObj, status: res.status };
+				try {
+					body = await res.json();
+				} catch (_) {
+					body = await res.text();
+				}
+				const errorMsg = body && body.error ? body.error : `http ${res.status}`;
+				return {
+					data: null,
+					error: errorMsg,
+					details: body,
+					headers: headersObj,
+					status: res.status,
+				};
 			}
 			const data = await res.json();
 			return { data, headers: headersObj, status: res.status };
 		} catch (err) {
 			clearTimeout(timeout);
-			console.error(`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`, err?.message || err);
+			console.error(
+				`⚠️ Falha ao requisitar ${url} (tentativa ${attempt}/${retries}):`,
+				err?.message || err
+			);
 			if (attempt === retries) {
 				console.error("⛔ Erro persistente ao acessar a API.");
 				return { data: null, error: "network_error", details: err?.message };
@@ -193,35 +228,64 @@ function getReadableInventory(playerData, itemIds, items) {
 }
 
 // Função para determinar status de Low Priority
-function getLowPriorityStatus(currentGameMode, previousGameMode, currentCount) {
+function getLowPriorityStatus(currentGameMode, previousGameMode) {
 	const isCurrentLow = currentGameMode === GAME_MODE_SINGLE_DRAFT;
 	const wasPreviousLow = previousGameMode === GAME_MODE_SINGLE_DRAFT;
-	
-	let newCount = currentCount;
+
 	let statusMessage = null;
-	
+	let newRecordMessage = null;
+	let showStreaks = false;
+	let exitCount = 0;
+
 	// Entrou na low (não estava antes, mas agora está)
 	if (isCurrentLow && !wasPreviousLow && previousGameMode !== null) {
 		statusMessage = "CAIU NA LOW KK";
-		newCount = 1;
+		state.currentLowPriorityStreak = 1;
+		showStreaks = true;
+
+		// Se já bateu o recorde com apenas 1 partida (caso o recorde seja 0)
+		if (state.currentLowPriorityStreak > state.bestLowPriorityStreak) {
+			state.bestLowPriorityStreak = state.currentLowPriorityStreak;
+			newRecordMessage = "NOVO RECORDE DE LOW STREAK";
+		}
 	}
 	// Continua na low
 	else if (isCurrentLow && wasPreviousLow) {
-		newCount = currentCount + 1;
-		statusMessage = `Lows jogadas: ${newCount}`;
+		state.currentLowPriorityStreak++;
+		showStreaks = true;
+
+		// Verifica se bateu novo recorde
+		if (state.currentLowPriorityStreak > state.bestLowPriorityStreak) {
+			state.bestLowPriorityStreak = state.currentLowPriorityStreak;
+			newRecordMessage = "NOVO RECORDE DE LOW STREAK";
+		}
 	}
 	// Saiu da low (estava antes, mas agora não está mais)
 	else if (!isCurrentLow && wasPreviousLow) {
 		statusMessage = "Saiu da low finalmente";
-		newCount = 0;
+		exitCount = state.currentLowPriorityStreak;
+
+		// Atualiza o recorde se necessário antes de zerar
+		if (state.currentLowPriorityStreak > state.bestLowPriorityStreak) {
+			state.bestLowPriorityStreak = state.currentLowPriorityStreak;
+		}
+
+		// Zera a streak atual
+		state.currentLowPriorityStreak = 0;
+		showStreaks = false;
 	}
 	// Primeira partida detectada e já está em low
 	else if (isCurrentLow && previousGameMode === null) {
-		newCount = 1;
-		statusMessage = `Lows jogadas: ${newCount}`;
+		state.currentLowPriorityStreak = 1;
+		showStreaks = true;
+
+		if (state.currentLowPriorityStreak > state.bestLowPriorityStreak) {
+			state.bestLowPriorityStreak = state.currentLowPriorityStreak;
+			newRecordMessage = "NOVO RECORDE DE LOW STREAK";
+		}
 	}
-	
-	return { newCount, statusMessage };
+
+	return { statusMessage, newRecordMessage, showStreaks, exitCount };
 }
 
 // Função para criar embed da partida
@@ -240,14 +304,12 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 
 	// Processa status de Low Priority
 	const currentGameMode = matchDetails.game_mode;
-	const { newCount, statusMessage } = getLowPriorityStatus(
+	const { statusMessage, newRecordMessage, showStreaks, exitCount } = getLowPriorityStatus(
 		currentGameMode,
-		state.lastGameMode,
-		state.lowPriorityCount
+		state.lastGameMode
 	);
-	
-	// Atualiza o estado
-	state.lowPriorityCount = newCount;
+
+	// Atualiza o lastGameMode
 	state.lastGameMode = currentGameMode;
 
 	const embed = new EmbedBuilder()
@@ -277,9 +339,17 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 
 	// Adiciona status de Low Priority se houver mensagem
 	if (statusMessage) {
+		let fieldName, fieldValue;
+		if (statusMessage === "Saiu da low finalmente") {
+			fieldName = statusMessage;
+			fieldValue = `Partidas jogadas para sair da low: ${exitCount}`;
+		} else {
+			fieldName = "⚠️ Low Priority";
+			fieldValue = newRecordMessage ? `${statusMessage}\n${newRecordMessage}` : statusMessage;
+		}
 		embed.addFields({
-			name: "⚠️ Low Priority",
-			value: statusMessage,
+			name: fieldName,
+			value: fieldValue,
 			inline: false,
 		});
 	}
@@ -308,6 +378,22 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 		});
 	}
 
+	// Só mostra streaks se estiver na low
+	if (showStreaks) {
+		embed.addFields(
+			{
+				name: `Melhor low streak: ${state.bestLowPriorityStreak}`,
+				value: "\u200B",
+				inline: true,
+			},
+			{
+				name: `Low streak atual: ${state.currentLowPriorityStreak}`,
+				value: "\u200B",
+				inline: true,
+			}
+		);
+	}
+
 	embed.setTimestamp(new Date(matchDetails.start_time * 1000));
 	embed.setFooter({ text: `Match ID: ${matchDetails.match_id}` });
 
@@ -329,7 +415,9 @@ function calculateTimeUntilReset() {
 // Função principal de verificação
 async function checkForNewMatches() {
 	if (isChecking) {
-		console.log("⏳ Verificação anterior ainda em andamento. Aguardando próxima janela.");
+		console.log(
+			"⏳ Verificação anterior ainda em andamento. Aguardando próxima janela."
+		);
 		return;
 	}
 	isChecking = true;
@@ -342,12 +430,12 @@ async function checkForNewMatches() {
 				`🧪 MODO TESTE: Testando com match ID: ${CONFIG.TEST_MATCH_ID}`
 			);
 			const matchDetails = await fetchMatchDetails(CONFIG.TEST_MATCH_ID);
-			
+
 			if (matchDetails.error) {
 				console.error("❌ Erro ao buscar match de teste:", matchDetails.error);
 				return;
 			}
-			
+
 			const heroes = await fetchHeroes();
 
 			const playerData = matchDetails.players.find(
@@ -362,7 +450,7 @@ async function checkForNewMatches() {
 			const embed = await createMatchEmbed(matchDetails, playerData, heroes);
 			const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
 			await channel.send({ embeds: [embed] });
-			
+
 			// Salva o estado após enviar
 			saveState(state);
 
@@ -371,36 +459,58 @@ async function checkForNewMatches() {
 			return;
 		}
 
-		const { data: matches, headers: respHeaders, status: respStatus, error: respError } = await fetchPlayerMatches(1);
+		const {
+			data: matches,
+			headers: respHeaders,
+			status: respStatus,
+			error: respError,
+		} = await fetchPlayerMatches(1);
 
 		// Loga headers relevantes (rate limit)
 		if (respHeaders) {
 			const remaining = {
-				minute: respHeaders['x-rate-limit-remaining-minute'],
-				day: respHeaders['x-rate-limit-remaining-day']
+				minute: respHeaders["x-rate-limit-remaining-minute"],
+				day: respHeaders["x-rate-limit-remaining-day"],
 			};
-			console.log(`📊 Rate limits - Minuto: ${remaining.minute || '?'}/60 | Dia: ${remaining.day || '?'}`);
-			
+			console.log(
+				`📊 Rate limits - Minuto: ${remaining.minute || "?"}/60 | Dia: ${
+					remaining.day || "?"
+				}`
+			);
+
 			// Warning se está chegando no limite
-			if (remaining.day && Number(remaining.day) < 100 && Number(remaining.day) > 0) {
-				console.warn(`⚠️ Aviso: Apenas ${remaining.day} requisições restantes hoje!`);
+			if (
+				remaining.day &&
+				Number(remaining.day) < 100 &&
+				Number(remaining.day) > 0
+			) {
+				console.warn(
+					`⚠️ Aviso: Apenas ${remaining.day} requisições restantes hoje!`
+				);
 			}
 		}
 
 		// Verifica erro de limite diário/ratelimit
 		if (respError) {
 			console.error(`❌ Erro da API OpenDota: ${respError}`);
-			if (String(respError).toLowerCase().includes("daily api limit exceeded") || respStatus === 429) {
+			if (
+				String(respError).toLowerCase().includes("daily api limit exceeded") ||
+				respStatus === 429
+			) {
 				const waitMs = calculateTimeUntilReset();
 				const nextMidnight = new Date(Date.now() + waitMs);
-				
-				console.log(`⏰ Rate limited. Aguardando até ${nextMidnight.toLocaleString('pt-BR')} (~${Math.round(waitMs/60000)} minutos)`);
-				
+
+				console.log(
+					`⏰ Rate limited. Aguardando até ${nextMidnight.toLocaleString(
+						"pt-BR"
+					)} (~${Math.round(waitMs / 60000)} minutos)`
+				);
+
 				// Cancela timeout anterior se existir
 				if (rateLimitWaitTimeout) {
 					clearTimeout(rateLimitWaitTimeout);
 				}
-				
+
 				// Aguarda até o reset e libera o lock
 				rateLimitWaitTimeout = setTimeout(() => {
 					console.log("🔄 Retomando verificações após reset do rate limit");
@@ -409,7 +519,7 @@ async function checkForNewMatches() {
 					// Força uma verificação imediata após o reset
 					checkForNewMatches();
 				}, waitMs);
-				
+
 				return; // Não libera isChecking aqui, será liberado pelo timeout
 			}
 			isChecking = false; // Libera para outros erros
@@ -441,12 +551,15 @@ async function checkForNewMatches() {
 
 			// Busca detalhes completos
 			const matchDetails = await fetchMatchDetails(latestMatch.match_id);
-			
+
 			if (matchDetails.error) {
-				console.error("❌ Erro ao buscar detalhes da partida:", matchDetails.error);
+				console.error(
+					"❌ Erro ao buscar detalhes da partida:",
+					matchDetails.error
+				);
 				return;
 			}
-			
+
 			const heroes = await fetchHeroes();
 
 			// Encontra os dados do jogador
@@ -490,48 +603,61 @@ async function checkForNewMatches() {
 
 // Status check endpoint (avoiding conflict with OpenDota's /health)
 const statusServer = http.createServer(async (req, res) => {
-	if (req.url === '/status') {
+	if (req.url === "/status") {
 		// Check OpenDota API health
-		let opendotaHealth = { status: 'unknown' };
+		let opendotaHealth = { status: "unknown" };
 		try {
-			const healthRes = await fetch('https://api.opendota.com/api/health', {
-				signal: AbortSignal.timeout(5000)
+			const healthRes = await fetch("https://api.opendota.com/api/health", {
+				signal: AbortSignal.timeout(5000),
 			});
 			opendotaHealth = await healthRes.json();
 		} catch (e) {
-			opendotaHealth = { status: 'error', error: e.message };
+			opendotaHealth = { status: "error", error: e.message };
 		}
 
-		res.writeHead(200, { 'Content-Type': 'application/json' });
-		res.end(JSON.stringify({
-			bot: {
-				status: 'ok',
-				connected: client.isReady(),
-				lastCheck: new Date().toISOString(),
-				lastMatchId: lastMatchId,
-				lowPriorityCount: state.lowPriorityCount,
-				lastGameMode: state.lastGameMode,
-				isChecking: isChecking,
-				waitingForRateLimit: !!rateLimitWaitTimeout
-			},
-			opendota: opendotaHealth
-		}, null, 2));
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(
+			JSON.stringify(
+				{
+					bot: {
+						status: "ok",
+						connected: client.isReady(),
+						lastCheck: new Date().toISOString(),
+						lastMatchId: lastMatchId,
+						lastGameMode: state.lastGameMode,
+						bestLowPriorityStreak: state.bestLowPriorityStreak,
+						currentLowPriorityStreak: state.currentLowPriorityStreak,
+						isChecking: isChecking,
+						waitingForRateLimit: !!rateLimitWaitTimeout,
+					},
+					opendota: opendotaHealth,
+				},
+				null,
+				2
+			)
+		);
 	} else {
 		res.writeHead(404);
-		res.end('Not Found');
+		res.end("Not Found");
 	}
 });
 
 statusServer.listen(CONFIG.HEALTH_CHECK_PORT, () => {
-	console.log(`📊 Status check disponível em http://localhost:${CONFIG.HEALTH_CHECK_PORT}/status`);
+	console.log(
+		`📊 Status check disponível em http://localhost:${CONFIG.HEALTH_CHECK_PORT}/status`
+	);
 });
 
 // Eventos do Discord
 client.once("ready", async () => {
 	console.log(`✅ Bot conectado como ${client.user.tag}`);
 	console.log(`👀 Monitorando jogador ID: ${CONFIG.PLAYER_ID}`);
-	console.log(`⏱️ Intervalo de verificação: ${CONFIG.CHECK_INTERVAL / 60000} minutos`);
-	console.log(`📊 Estado inicial: ${state.lowPriorityCount} lows jogadas, último game_mode: ${state.lastGameMode}`);
+	console.log(
+		`⏱️ Intervalo de verificação: ${CONFIG.CHECK_INTERVAL / 60000} minutos`
+	);
+	console.log(
+		`📊 Estado inicial: último game_mode: ${state.lastGameMode}, melhor streak: ${state.bestLowPriorityStreak}, streak atual: ${state.currentLowPriorityStreak}`
+	);
 
 	if (CONFIG.TEST_MATCH_ID) {
 		console.log("🧪 Modo de teste com match específico - executando uma vez");
@@ -542,14 +668,17 @@ client.once("ready", async () => {
 	// Testa acesso à API antes de iniciar verificações
 	console.log("🔍 Testando acesso à API OpenDota...");
 	const testResult = await fetchPlayerMatches(1);
-	
+
 	if (testResult.error) {
 		console.error("❌ API inacessível no startup.");
 		if (testResult.status === 429) {
-			console.error("⛔ Rate limit ativo. O bot aguardará automaticamente o reset.");
-			// Inicia mesmo com rate limit, a função checkForNewMatches vai lidar com isso
+			console.error(
+				"⛔ Rate limit ativo. O bot aguardará automaticamente o reset."
+			);
 		} else {
-			console.error("⚠️ Continuando mesmo com erro. Tentativas futuras podem funcionar.");
+			console.error(
+				"⚠️ Continuando mesmo com erro. Tentativas futuras podem funcionar."
+			);
 		}
 	} else {
 		console.log("✅ API acessível!");
@@ -565,8 +694,8 @@ client.on("error", (error) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-	console.log('\n🛑 Encerrando bot...');
+process.on("SIGINT", () => {
+	console.log("\n🛑 Encerrando bot...");
 	if (rateLimitWaitTimeout) {
 		clearTimeout(rateLimitWaitTimeout);
 	}
@@ -575,8 +704,8 @@ process.on('SIGINT', () => {
 	process.exit(0);
 });
 
-process.on('SIGTERM', () => {
-	console.log('\n🛑 Encerrando bot...');
+process.on("SIGTERM", () => {
+	console.log("\n🛑 Encerrando bot...");
 	if (rateLimitWaitTimeout) {
 		clearTimeout(rateLimitWaitTimeout);
 	}
