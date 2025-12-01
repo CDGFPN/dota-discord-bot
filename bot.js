@@ -26,20 +26,32 @@ const STATE_FILE = path.resolve(__dirname, "bot-state.json");
 
 function loadState() {
 	if (!fs.existsSync(STATE_FILE)) {
-		return { lastMatchId: null };
+		return { 
+			lastMatchId: null,
+			lowPriorityCount: 0,
+			lastGameMode: null
+		};
 	}
 	try {
-		return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+		const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+		// Garante que os novos campos existam mesmo em estados antigos
+		if (state.lowPriorityCount === undefined) state.lowPriorityCount = 0;
+		if (state.lastGameMode === undefined) state.lastGameMode = null;
+		return state;
 	} catch (e) {
 		console.error("⚠️ Erro ao ler estado, iniciando limpo:", e.message);
-		return { lastMatchId: null };
+		return { 
+			lastMatchId: null,
+			lowPriorityCount: 0,
+			lastGameMode: null
+		};
 	}
 }
 
 function saveState(state) {
 	try {
 		fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-		console.log(`💾 Estado salvo: lastMatchId=${state.lastMatchId}`);
+		console.log(`💾 Estado salvo: lastMatchId=${state.lastMatchId}, lowPriorityCount=${state.lowPriorityCount}, lastGameMode=${state.lastGameMode}`);
 	} catch (e) {
 		console.error("❌ Erro ao salvar estado:", e.message);
 	}
@@ -49,6 +61,9 @@ let state = loadState();
 let lastMatchId = state.lastMatchId;
 let isChecking = false;
 let rateLimitWaitTimeout = null;
+
+// Constante para game_mode de Single Draft (Low Priority)
+const GAME_MODE_SINGLE_DRAFT = 4;
 
 // Utilidades para fetch com retry/timeout
 function delay(ms) {
@@ -177,6 +192,38 @@ function getReadableInventory(playerData, itemIds, items) {
 	return { invItems, backpackItems, quebrouItens };
 }
 
+// Função para determinar status de Low Priority
+function getLowPriorityStatus(currentGameMode, previousGameMode, currentCount) {
+	const isCurrentLow = currentGameMode === GAME_MODE_SINGLE_DRAFT;
+	const wasPreviousLow = previousGameMode === GAME_MODE_SINGLE_DRAFT;
+	
+	let newCount = currentCount;
+	let statusMessage = null;
+	
+	// Entrou na low (não estava antes, mas agora está)
+	if (isCurrentLow && !wasPreviousLow && previousGameMode !== null) {
+		statusMessage = "CAIU NA LOW KK";
+		newCount = 1;
+	}
+	// Continua na low
+	else if (isCurrentLow && wasPreviousLow) {
+		newCount = currentCount + 1;
+		statusMessage = `Lows jogadas: ${newCount}`;
+	}
+	// Saiu da low (estava antes, mas agora não está mais)
+	else if (!isCurrentLow && wasPreviousLow) {
+		statusMessage = "Saiu da low finalmente";
+		newCount = 0;
+	}
+	// Primeira partida detectada e já está em low
+	else if (isCurrentLow && previousGameMode === null) {
+		newCount = 1;
+		statusMessage = `Lows jogadas: ${newCount}`;
+	}
+	
+	return { newCount, statusMessage };
+}
+
 // Função para criar embed da partida
 async function createMatchEmbed(matchDetails, playerData, heroes) {
 	const hero = heroes.find((h) => h.id === playerData.hero_id);
@@ -190,6 +237,18 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 	const won = playerData.win === 1;
 	const kda = `${playerData.kills}/${playerData.deaths}/${playerData.assists}`;
 	const duration = Math.floor(matchDetails.duration / 60);
+
+	// Processa status de Low Priority
+	const currentGameMode = matchDetails.game_mode;
+	const { newCount, statusMessage } = getLowPriorityStatus(
+		currentGameMode,
+		state.lastGameMode,
+		state.lowPriorityCount
+	);
+	
+	// Atualiza o estado
+	state.lowPriorityCount = newCount;
+	state.lastGameMode = currentGameMode;
 
 	const embed = new EmbedBuilder()
 		.setTitle(`🎮 Nova Partida do Alda!`)
@@ -215,6 +274,15 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 				inline: true,
 			}
 		);
+
+	// Adiciona status de Low Priority se houver mensagem
+	if (statusMessage) {
+		embed.addFields({
+			name: "⚠️ Low Priority",
+			value: statusMessage,
+			inline: false,
+		});
+	}
 
 	if (invItems.length > 0) {
 		embed.addFields({
@@ -294,6 +362,9 @@ async function checkForNewMatches() {
 			const embed = await createMatchEmbed(matchDetails, playerData, heroes);
 			const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
 			await channel.send({ embeds: [embed] });
+			
+			// Salva o estado após enviar
+			saveState(state);
 
 			console.log("✅ Teste enviado com sucesso!");
 			console.log("⚠️ Desative TEST_MATCH_ID para voltar ao modo normal");
@@ -438,6 +509,8 @@ const statusServer = http.createServer(async (req, res) => {
 				connected: client.isReady(),
 				lastCheck: new Date().toISOString(),
 				lastMatchId: lastMatchId,
+				lowPriorityCount: state.lowPriorityCount,
+				lastGameMode: state.lastGameMode,
 				isChecking: isChecking,
 				waitingForRateLimit: !!rateLimitWaitTimeout
 			},
@@ -458,6 +531,7 @@ client.once("ready", async () => {
 	console.log(`✅ Bot conectado como ${client.user.tag}`);
 	console.log(`👀 Monitorando jogador ID: ${CONFIG.PLAYER_ID}`);
 	console.log(`⏱️ Intervalo de verificação: ${CONFIG.CHECK_INTERVAL / 60000} minutos`);
+	console.log(`📊 Estado inicial: ${state.lowPriorityCount} lows jogadas, último game_mode: ${state.lastGameMode}`);
 
 	if (CONFIG.TEST_MATCH_ID) {
 		console.log("🧪 Modo de teste com match específico - executando uma vez");
@@ -506,7 +580,7 @@ process.on('SIGTERM', () => {
 	if (rateLimitWaitTimeout) {
 		clearTimeout(rateLimitWaitTimeout);
 	}
-	healthServer.close();
+	statusServer.close();
 	client.destroy();
 	process.exit(0);
 });
