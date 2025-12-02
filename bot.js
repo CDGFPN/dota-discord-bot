@@ -390,7 +390,7 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 
 	const won = playerData.win === 1;
 	const kda = `${playerData.kills}/${playerData.deaths}/${playerData.assists}`;
-	const duration = Math.floor(matchDetails.duration / 60);
+	const duration = new Date(matchDetails.duration * 1000).toISOString().slice(14, 19)
 
 	// Processa status de Low Priority
 	const currentGameMode = matchDetails.game_mode;
