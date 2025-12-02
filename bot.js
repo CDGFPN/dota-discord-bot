@@ -2,6 +2,8 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+const { AttachmentBuilder } = require("discord.js");
+const { createCanvas, loadImage } = require("canvas"); // npm install canvas
 require("dotenv").config();
 
 // Configurações via .env
@@ -224,6 +226,97 @@ function getReadableInventory(playerData, itemIds, items) {
 	return { invItems, backpackItems, quebrouItens };
 }
 
+// Função para gerar grid 3x3 de itens (6 principais + 3 backpack)
+async function generateItemsImage(playerData, itemIds, items) {
+	const ITEM_SIZE = 46
+	const PADDING = 8
+	const GRID_SIZE = ITEM_SIZE + PADDING * 2;
+	const canvas = createCanvas(GRID_SIZE * 3, GRID_SIZE * 3);
+	const ctx = canvas.getContext("2d");
+
+	// Fundo escuro
+	ctx.fillStyle = "#111114";
+	ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+	const slots = [
+		"item_0",
+		"item_1",
+		"item_2",
+		"item_3",
+		"item_4",
+		"item_5",
+		"backpack_0",
+		"backpack_1",
+		"backpack_2",
+	];
+
+	for (let i = 0; i < slots.length; i++) {
+		const slotName = slots[i];
+		const itemId = playerData[slotName];
+		const col = i % 3;
+		const row = Math.floor(i / 3);
+		const x = col * GRID_SIZE + PADDING;
+		const y = row * GRID_SIZE + PADDING;
+
+		// Slot vazio
+		// Fundo do slot
+		ctx.fillStyle = "#1e1f23";
+		ctx.fillRect(x - 6, y - 6, ITEM_SIZE + 12, ITEM_SIZE + 12);
+
+		if (!itemId || itemId === 0) {
+			// Slot vazio
+			ctx.fillStyle = "#444";
+			ctx.font = "30px Arial";
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText("—", x + ITEM_SIZE / 2, y + ITEM_SIZE / 2);
+			continue;
+		}
+
+		const internalName = itemIds[itemId];
+		const itemInfo = items[internalName];
+		if (!itemInfo?.img) continue;
+
+		try {
+			const img = await loadImage(
+				`https://cdn.cloudflare.steamstatic.com${itemInfo.img}`
+			);
+			ctx.drawImage(img, x, y, ITEM_SIZE, ITEM_SIZE);
+		} catch (e) {
+			// Se falhar em carregar a imagem
+			ctx.fillStyle = "#f04747";
+			ctx.font = "24px Arial";
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText("?");
+		}
+	}
+
+	// // Item neutro (canto inferior direito)
+	// if (playerData.item_neutral && playerData.item_neutral !== 0) {
+	// 	const neutralId = playerData.item_neutral;
+	// 	const internal = itemIds[neutralId];
+	// 	const neutralInfo = items[internal];
+	// 	if (neutralInfo?.img) {
+	// 		try {
+	// 			const img = await loadImage(
+	// 				`https://cdn.cloudflare.steamstatic.com${neutralInfo.img}`
+	// 			);
+	// 			const nx = 2 * GRID_SIZE + PADDING;
+	// 			const ny = 2 * GRID_SIZE + PADDING;
+	// 			ctx.fillStyle = "#1e1f23";
+	// 			ctx.fillRect(nx - 6, ny - 6, ITEM_SIZE + 12, ITEM_SIZE + 12);
+	// 			ctx.drawImage(img, nx, ny, ITEM_SIZE, ITEM_SIZE);
+	// 			ctx.strokeStyle = "#ffeb3b";
+	// 			ctx.lineWidth = 4;
+	// 			ctx.strokeRect(nx - 6, ny - 6, ITEM_SIZE + 12, ITEM_SIZE + 12);
+	// 		} catch (e) {}
+	// 	}
+	// }
+
+	return canvas.toBuffer("image/png");
+}
+
 // Função para determinar status de Low Priority
 function getLowPriorityStatus(currentGameMode, previousGameMode) {
 	const isCurrentLow = currentGameMode === GAME_MODE_SINGLE_DRAFT;
@@ -287,7 +380,7 @@ function getLowPriorityStatus(currentGameMode, previousGameMode) {
 
 // Função para criar embed da partida
 async function createMatchEmbed(matchDetails, playerData, heroes) {
-	const hero = heroes[playerData.hero_id]
+	const hero = heroes[playerData.hero_id];
 	const { itemIds, items } = await fetchItemData();
 	const { invItems, backpackItems, quebrouItens } = getReadableInventory(
 		playerData,
@@ -301,10 +394,8 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 
 	// Processa status de Low Priority
 	const currentGameMode = matchDetails.game_mode;
-	const { statusMessage, newRecordMessage, showStreaks, exitCount } = getLowPriorityStatus(
-		currentGameMode,
-		state.lastGameMode
-	);
+	const { statusMessage, newRecordMessage, showStreaks, exitCount } =
+		getLowPriorityStatus(currentGameMode, state.lastGameMode);
 
 	// Atualiza o lastGameMode
 	state.lastGameMode = currentGameMode;
@@ -342,7 +433,9 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 			fieldValue = `Partidas jogadas para sair da low: ${exitCount}`;
 		} else {
 			fieldName = "⚠️ Low Priority";
-			fieldValue = newRecordMessage ? `${statusMessage}\n${newRecordMessage}` : statusMessage;
+			fieldValue = newRecordMessage
+				? `${statusMessage}\n${newRecordMessage}`
+				: statusMessage;
 		}
 		embed.addFields({
 			name: fieldName,
@@ -385,22 +478,6 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 		});
 	}
 
-	if (invItems.length > 0) {
-		embed.addFields({
-			name: "🎒 Inventário",
-			value: invItems.join(", "),
-			inline: false,
-		});
-	}
-
-	if (backpackItems.length > 0) {
-		embed.addFields({
-			name: "🎁 Backpack",
-			value: backpackItems.join(", "),
-			inline: false,
-		});
-	}
-
 	if (quebrouItens) {
 		embed.addFields({
 			name: "😂",
@@ -415,8 +492,36 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 	if (hero?.img) {
 		embed.setThumbnail(`https://cdn.cloudflare.steamstatic.com${hero.img}`);
 	}
+	if (invItems.length > 0 || backpackItems.length > 0) {
+		try {
+			const itemsBuffer = await generateItemsImage(playerData, itemIds, items);
+			const attachment = new AttachmentBuilder(itemsBuffer, {
+				name: "itens.png",
+			});
+			embed.setImage("attachment://itens.png");
+			return { embed, attachment };
+		} catch (err) {
+			console.error("Erro ao gerar imagem de itens:", err);
+			// fallback: mostra texto se a imagem falhar
+			if (invItems.length > 0) {
+				embed.addFields({
+					name: "Inventário",
+					value: invItems.join(", "),
+					inline: false,
+				});
+			}
+			if (backpackItems.length > 0) {
+				embed.addFields({
+					name: "Backpack",
+					value: backpackItems.join(", "),
+					inline: false,
+				});
+			}
+			return { embed, attachment: null };
+		}
+	}
 
-	return embed;
+	return { embed, attachment: null };
 }
 
 // Função para calcular tempo até próximo reset (midnight UTC)
@@ -462,9 +567,16 @@ async function checkForNewMatches() {
 				return;
 			}
 
-			const embed = await createMatchEmbed(matchDetails, playerData, heroes);
+			const { embed, attachment } = await createMatchEmbed(
+				matchDetails,
+				playerData,
+				heroes
+			);
 			const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
-			await channel.send({ embeds: [embed] });
+			await channel.send({
+				embeds: [embed],
+				files: attachment ? [attachment] : [],
+			});
 
 			// Salva o estado após enviar
 			saveState(state);
@@ -588,9 +700,16 @@ async function checkForNewMatches() {
 			}
 
 			// Cria e envia embed
-			const embed = await createMatchEmbed(matchDetails, playerData, heroes);
+			const { embed, attachment } = await createMatchEmbed(
+				matchDetails,
+				playerData,
+				heroes
+			);
 			const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
-			await channel.send({ embeds: [embed] });
+			await channel.send({
+				embeds: [embed],
+				files: attachment ? [attachment] : [],
+			});
 
 			// Atualiza e persiste última partida
 			lastMatchId = latestId;
