@@ -416,7 +416,7 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 				inline: true,
 			},
 			{ name: "📊 KDA", value: kda, inline: true },
-			{ name: "⏱️ Duração", value: `${duration} minutos`, inline: true },
+			{ name: "⏱️ Duração", value: `${duration}`, inline: true },
 			{ name: "💰 GPM", value: `${playerData.gold_per_min}`, inline: true },
 			{
 				name: "📈 XPM",
