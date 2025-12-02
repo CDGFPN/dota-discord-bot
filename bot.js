@@ -228,8 +228,8 @@ function getReadableInventory(playerData, itemIds, items) {
 
 // Função para gerar grid 3x3 de itens (6 principais + 3 backpack)
 async function generateItemsImage(playerData, itemIds, items) {
-	const ITEM_SIZE = 46
-	const PADDING = 8
+	const ITEM_SIZE = 46;
+	const PADDING = 8;
 	const GRID_SIZE = ITEM_SIZE + PADDING * 2;
 	const canvas = createCanvas(GRID_SIZE * 3, GRID_SIZE * 3);
 	const ctx = canvas.getContext("2d");
@@ -547,23 +547,32 @@ async function checkForNewMatches() {
 		// Se TEST_MATCH_ID estiver definido, testa com essa partida específica
 		if (CONFIG.TEST_MATCH_ID) {
 			console.log(
-				`🧪 MODO TESTE: Testando com match ID: ${CONFIG.TEST_MATCH_ID}`
+				`MODO TESTE VISUAL: Gerando preview da match ${CONFIG.TEST_MATCH_ID}`
 			);
+			console.log("NADA será enviado ao Discord nem salvo no bot-state.json\n");
+
 			const matchDetails = await fetchMatchDetails(CONFIG.TEST_MATCH_ID);
 
 			if (matchDetails.error) {
-				console.error("❌ Erro ao buscar match de teste:", matchDetails.error);
+				console.error("Erro ao buscar match de teste:", matchDetails.error);
+				isChecking = false;
 				return;
 			}
 
 			const heroes = await fetchHeroes();
+			if (heroes.error) {
+				console.error("Erro ao carregar heróis:", heroes.error);
+				isChecking = false;
+				return;
+			}
 
 			const playerData = matchDetails.players.find(
 				(p) => String(p.account_id) === CONFIG.PLAYER_ID
 			);
 
 			if (!playerData) {
-				console.log("❌ Jogador não encontrado na partida");
+				console.log("Jogador não encontrado na partida de teste");
+				isChecking = false;
 				return;
 			}
 
@@ -572,18 +581,59 @@ async function checkForNewMatches() {
 				playerData,
 				heroes
 			);
-			const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
-			await channel.send({
-				embeds: [embed],
-				files: attachment ? [attachment] : [],
+
+			// PREVIEW NO CONSOLE
+			console.log("\nEMBED QUE SERIA ENVIADO:");
+			console.log("════════════════════════════════");
+			console.log(`Título: ${embed.data.title}`);
+			console.log(
+				`Cor: ${
+					embed.data.color === 0x00ff00
+						? "Verde (Vitória)"
+						: "Vermelho (Derrota)"
+				}`
+			);
+			console.log(`URL: ${embed.data.url}`);
+			embed.data.fields?.forEach((field) => {
+				console.log(`• ${field.name}: ${field.value}`);
 			});
+			console.log(`Thumbnail: ${embed.data.thumbnail?.url || "nenhum"}`);
+			console.log(`Imagem de itens: ${attachment ? "Sim (itens.png)" : "Não"}`);
+			console.log("════════════════════════════════\n");
 
-			// Salva o estado após enviar
-			saveState(state);
+			if (attachment) {
+				const { itemIds, items } = await fetchItemData();
+				const itemsBuffer = await generateItemsImage(
+					playerData,
+					itemIds,
+					items
+				);
 
-			console.log("✅ Teste enviado com sucesso!");
-			console.log("⚠️ Desative TEST_MATCH_ID para voltar ao modo normal");
-			return;
+				const filename = `preview_itens_${CONFIG.TEST_MATCH_ID}.png`;
+				require("fs").writeFileSync(filename, itemsBuffer);
+
+				console.log(`Imagem de itens salva como: ${filename}`);
+				console.log(
+					`Abra esse arquivo para ver exatamente como ficaria no Discord!\n`
+				);
+			} else {
+				console.log(`Nenhum item para mostrar (ou falha ao gerar imagem)\n`);
+			}
+
+			// === Mostra link do OpenDota e Dotabuff ===
+			console.log(`Links úteis:`);
+			console.log(
+				`OpenDota: https://www.opendota.com/matches/${CONFIG.TEST_MATCH_ID}`
+			);
+			console.log(
+				`Dotabuff: https://www.dotabuff.com/matches/${CONFIG.TEST_MATCH_ID}\n`
+			);
+
+			console.log(`Preview concluído!`);
+			console.log(`Para usar normalmente, remova TEST_MATCH_ID do .env\n`);
+
+			isChecking = false;
+			return; 
 		}
 
 		const {
