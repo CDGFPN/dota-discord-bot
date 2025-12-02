@@ -12,7 +12,6 @@ const CONFIG = {
 	CHANNEL_ID: process.env.CHANNEL_ID,
 	PLAYER_ID: process.env.PLAYER_ID,
 	CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL) || 900000,
-	TEST_MODE: String(process.env.TEST_MODE || "false").toLowerCase() === "true",
 	TEST_MATCH_ID: process.env.TEST_MATCH_ID || null,
 	FORCE_SEND_TEST_MATCH: process.env.FORCE_SEND_TEST_MATCH || null,
 	FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 10000),
@@ -391,7 +390,9 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 
 	const won = playerData.win === 1;
 	const kda = `${playerData.kills}/${playerData.deaths}/${playerData.assists}`;
-	const duration = new Date(matchDetails.duration * 1000).toISOString().slice(14, 19)
+	const duration = new Date(matchDetails.duration * 1000)
+		.toISOString()
+		.slice(14, 19);
 
 	// Processa status de Low Priority
 	const currentGameMode = matchDetails.game_mode;
@@ -548,7 +549,8 @@ async function checkForNewMatches() {
 		// Se TEST_MATCH_ID estiver definido, testa com essa partida específica
 		if (CONFIG.TEST_MATCH_ID || CONFIG.FORCE_SEND_TEST_MATCH) {
 			const testMatchId = CONFIG.TEST_MATCH_ID || CONFIG.FORCE_SEND_TEST_MATCH;
-			const previewOnly = !!CONFIG.TEST_MATCH_ID && !CONFIG.FORCE_SEND_TEST_MATCH;
+			const previewOnly =
+				!!CONFIG.TEST_MATCH_ID && !CONFIG.FORCE_SEND_TEST_MATCH;
 
 			console.log(
 				previewOnly
@@ -560,7 +562,10 @@ async function checkForNewMatches() {
 			// Busca detalhes da partida
 			const matchDetails = await fetchMatchDetails(testMatchId);
 			if (matchDetails.error) {
-				console.error("Erro ao buscar detalhes da partida:", matchDetails.error);
+				console.error(
+					"Erro ao buscar detalhes da partida:",
+					matchDetails.error
+				);
 				isChecking = false;
 				return;
 			}
@@ -585,12 +590,20 @@ async function checkForNewMatches() {
 
 			// PREVIEW BONITINHO NO CONSOLE
 
-			console.log("\nEMBED QUE " + (previewOnly ? "SERIA" : "FOI") + " ENVIADO:");
+			console.log(
+				"\nEMBED QUE " + (previewOnly ? "SERIA" : "FOI") + " ENVIADO:"
+			);
 			console.log("════════════════════════════════");
 			console.log(`Título: ${embed.data.title}`);
-			console.log(`Cor: ${embed.data.color === 0x00ff00 ? "Verde (Vitória)" : "Vermelho (Derrota)"}`);
+			console.log(
+				`Cor: ${
+					embed.data.color === 0x00ff00
+						? "Verde (Vitória)"
+						: "Vermelho (Derrota)"
+				}`
+			);
 			console.log(`URL: ${embed.data.url}`);
-			embed.data.fields?.forEach(field => {
+			embed.data.fields?.forEach((field) => {
 				console.log(`• ${field.name}: ${field.value}`);
 			});
 			console.log(`Thumbnail: ${embed.data.thumbnail?.url || "nenhum"}`);
@@ -601,7 +614,11 @@ async function checkForNewMatches() {
 			if (attachment) {
 				try {
 					const { itemIds, items } = await fetchItemData();
-					const itemsBuffer = await generateItemsImage(playerData, itemIds, items);
+					const itemsBuffer = await generateItemsImage(
+						playerData,
+						itemIds,
+						items
+					);
 					const filename = `preview_itens_${testMatchId}.png`;
 					require("fs").writeFileSync(filename, itemsBuffer);
 					console.log(`Imagem de itens salva → ${filename}\n`);
@@ -629,17 +646,23 @@ async function checkForNewMatches() {
 			// Links úteis
 			console.log("\nLinks da partida:");
 			console.log(`OpenDota : https://www.opendota.com/matches/${testMatchId}`);
-			console.log(`Dotabuff : https://www.dotabuff.com/matches/${testMatchId}\n`);
+			console.log(
+				`Dotabuff : https://www.dotabuff.com/matches/${testMatchId}\n`
+			);
 
 			console.log("Teste finalizado!");
 			if (previewOnly) {
-				console.log("→ Remova TEST_MATCH_ID do .env para voltar ao modo normal");
+				console.log(
+					"→ Remova TEST_MATCH_ID do .env para voltar ao modo normal"
+				);
 			} else {
-				console.log("→ Remova FORCE_SEND_TEST_MATCH do .env para voltar ao modo normal");
+				console.log(
+					"→ Remova FORCE_SEND_TEST_MATCH do .env para voltar ao modo normal"
+				);
 			}
 
 			isChecking = false;
-			return; 
+			return;
 		}
 
 		const {
@@ -723,13 +746,10 @@ async function checkForNewMatches() {
 			state.lastMatchId = latestId;
 			saveState(state);
 			console.log(`✅ Inicializado com match ID: ${lastMatchId}`);
-
-			// Modo teste: envia a última partida mesmo sendo a primeira verificação
-			if (!CONFIG.TEST_MODE) return;
 		}
 
 		// Verifica se há nova partida
-		if (latestId !== lastMatchId || CONFIG.TEST_MODE) {
+		if (latestId !== lastMatchId) {
 			console.log(`🆕 Nova partida detectada: ${latestMatch.match_id}`);
 
 			// Busca detalhes completos
@@ -772,12 +792,6 @@ async function checkForNewMatches() {
 			state.lastMatchId = latestId;
 			saveState(state);
 			console.log("✅ Notificação enviada com sucesso!");
-
-			// Desativa TEST_MODE após enviar
-			if (CONFIG.TEST_MODE) {
-				CONFIG.TEST_MODE = false;
-				console.log("ℹ️ TEST_MODE desativado automaticamente");
-			}
 		} else {
 			console.log("ℹ️ Nenhuma partida nova");
 		}
