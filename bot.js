@@ -14,6 +14,7 @@ const CONFIG = {
 	CHECK_INTERVAL: Number(process.env.CHECK_INTERVAL) || 900000,
 	TEST_MODE: String(process.env.TEST_MODE || "false").toLowerCase() === "true",
 	TEST_MATCH_ID: process.env.TEST_MATCH_ID || null,
+	FORCE_SEND_TEST_MATCH: process.env.FORCE_SEND_TEST_MATCH || null,
 	FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 10000),
 	HEALTH_CHECK_PORT: Number(process.env.HEALTH_CHECK_PORT || 3001),
 };
@@ -545,92 +546,97 @@ async function checkForNewMatches() {
 		console.log("🔍 Verificando novas partidas...");
 
 		// Se TEST_MATCH_ID estiver definido, testa com essa partida específica
-		if (CONFIG.TEST_MATCH_ID) {
+		if (CONFIG.TEST_MATCH_ID || CONFIG.FORCE_SEND_TEST_MATCH) {
+			const testMatchId = CONFIG.TEST_MATCH_ID || CONFIG.FORCE_SEND_TEST_MATCH;
+			const previewOnly = !!CONFIG.TEST_MATCH_ID && !CONFIG.FORCE_SEND_TEST_MATCH;
+
 			console.log(
-				`MODO TESTE VISUAL: Gerando preview da match ${CONFIG.TEST_MATCH_ID}`
+				previewOnly
+					? `MODO TESTE VISUAL para a match ${testMatchId}`
+					: `MODO TESTE COM ENVIO REAL para a match ${testMatchId}`
 			);
-			console.log("NADA será enviado ao Discord nem salvo no bot-state.json\n");
+			console.log("bot-state.json NÃO será modificado em nenhum dos casos.\n");
 
-			const matchDetails = await fetchMatchDetails(CONFIG.TEST_MATCH_ID);
-
+			// Busca detalhes da partida
+			const matchDetails = await fetchMatchDetails(testMatchId);
 			if (matchDetails.error) {
-				console.error("Erro ao buscar match de teste:", matchDetails.error);
+				console.error("Erro ao buscar detalhes da partida:", matchDetails.error);
 				isChecking = false;
 				return;
 			}
 
 			const heroes = await fetchHeroes();
-			if (heroes.error) {
-				console.error("Erro ao carregar heróis:", heroes.error);
-				isChecking = false;
-				return;
-			}
 
 			const playerData = matchDetails.players.find(
 				(p) => String(p.account_id) === CONFIG.PLAYER_ID
 			);
-
 			if (!playerData) {
-				console.log("Jogador não encontrado na partida de teste");
+				console.log("Jogador não encontrado nessa partida");
 				isChecking = false;
 				return;
 			}
 
+			// Gera o embed + imagem exatamente como seria no modo real
 			const { embed, attachment } = await createMatchEmbed(
 				matchDetails,
 				playerData,
 				heroes
 			);
 
-			// PREVIEW NO CONSOLE
-			console.log("\nEMBED QUE SERIA ENVIADO:");
+			// PREVIEW BONITINHO NO CONSOLE
+
+			console.log("\nEMBED QUE " + (previewOnly ? "SERIA" : "FOI") + " ENVIADO:");
 			console.log("════════════════════════════════");
 			console.log(`Título: ${embed.data.title}`);
-			console.log(
-				`Cor: ${
-					embed.data.color === 0x00ff00
-						? "Verde (Vitória)"
-						: "Vermelho (Derrota)"
-				}`
-			);
+			console.log(`Cor: ${embed.data.color === 0x00ff00 ? "Verde (Vitória)" : "Vermelho (Derrota)"}`);
 			console.log(`URL: ${embed.data.url}`);
-			embed.data.fields?.forEach((field) => {
+			embed.data.fields?.forEach(field => {
 				console.log(`• ${field.name}: ${field.value}`);
 			});
 			console.log(`Thumbnail: ${embed.data.thumbnail?.url || "nenhum"}`);
-			console.log(`Imagem de itens: ${attachment ? "Sim (itens.png)" : "Não"}`);
+			console.log(`Imagem de itens: ${attachment ? "Sim" : "Não"}`);
 			console.log("════════════════════════════════\n");
 
+			// SALVA IMAGEM DE ITENS LOCALMENTE
 			if (attachment) {
-				const { itemIds, items } = await fetchItemData();
-				const itemsBuffer = await generateItemsImage(
-					playerData,
-					itemIds,
-					items
-				);
-
-				const filename = `preview_itens_${CONFIG.TEST_MATCH_ID}.png`;
-				require("fs").writeFileSync(filename, itemsBuffer);
-
-				console.log(`Imagem de itens salva como: ${filename}`);
-				console.log(
-					`Abra esse arquivo para ver exatamente como ficaria no Discord!\n`
-				);
-			} else {
-				console.log(`Nenhum item para mostrar (ou falha ao gerar imagem)\n`);
+				try {
+					const { itemIds, items } = await fetchItemData();
+					const itemsBuffer = await generateItemsImage(playerData, itemIds, items);
+					const filename = `preview_itens_${testMatchId}.png`;
+					require("fs").writeFileSync(filename, itemsBuffer);
+					console.log(`Imagem de itens salva → ${filename}\n`);
+				} catch (e) {
+					console.error("Falha ao salvar imagem de itens:", e.message);
+				}
 			}
 
-			// === Mostra link do OpenDota e Dotabuff ===
-			console.log(`Links úteis:`);
-			console.log(
-				`OpenDota: https://www.opendota.com/matches/${CONFIG.TEST_MATCH_ID}`
-			);
-			console.log(
-				`Dotabuff: https://www.dotabuff.com/matches/${CONFIG.TEST_MATCH_ID}\n`
-			);
+			// ENVIA NO CANAL (apenas se quiser)
+			if (!previewOnly) {
+				try {
+					const channel = await client.channels.fetch(CONFIG.CHANNEL_ID);
+					await channel.send({
+						embeds: [embed],
+						files: attachment ? [attachment] : [],
+					});
+					console.log("MENSAGEM ENVIADA NO CANAL COM SUCESSO!");
+				} catch (err) {
+					console.error("Erro ao enviar mensagem no Discord:", err.message);
+				}
+			} else {
+				console.log("Mensagem NÃO enviada (modo preview only)");
+			}
 
-			console.log(`Preview concluído!`);
-			console.log(`Para usar normalmente, remova TEST_MATCH_ID do .env\n`);
+			// Links úteis
+			console.log("\nLinks da partida:");
+			console.log(`OpenDota : https://www.opendota.com/matches/${testMatchId}`);
+			console.log(`Dotabuff : https://www.dotabuff.com/matches/${testMatchId}\n`);
+
+			console.log("Teste finalizado!");
+			if (previewOnly) {
+				console.log("→ Remova TEST_MATCH_ID do .env para voltar ao modo normal");
+			} else {
+				console.log("→ Remova FORCE_SEND_TEST_MATCH do .env para voltar ao modo normal");
+			}
 
 			isChecking = false;
 			return; 
