@@ -119,8 +119,8 @@ async function safeFetchJson(
 }
 
 // Função para buscar matches do jogador
-async function fetchPlayerMatches(limit = 1) {
-	const url = `https://api.opendota.com/api/players/${CONFIG.PLAYER_ID}/matches?limit=${limit}`;
+async function fetchPlayerMatches() {
+	const url = `https://api.opendota.com/api/players/${CONFIG.PLAYER_ID}/recentMatches`;
 	const retries = 3;
 	for (let attempt = 1; attempt <= retries; attempt++) {
 		const controller = new AbortController();
@@ -544,7 +544,13 @@ async function checkForNewMatches() {
 	}
 	isChecking = true;
 	try {
-		console.log("🔍 Verificando novas partidas...");
+		const now = new Date();
+		const time = `${now.getHours().toString().padStart(2, "0")}:${now
+			.getMinutes()
+			.toString()
+			.padStart(2, "0")}`;
+
+		console.log(`🔍 Verificando novas partidas (${time})`);
 
 		// Se TEST_MATCH_ID estiver definido, testa com essa partida específica
 		if (CONFIG.TEST_MATCH_ID || CONFIG.FORCE_SEND_TEST_MATCH) {
@@ -670,7 +676,7 @@ async function checkForNewMatches() {
 			headers: respHeaders,
 			status: respStatus,
 			error: respError,
-		} = await fetchPlayerMatches(1);
+		} = await fetchPlayerMatches();
 
 		// Loga headers relevantes (rate limit)
 		if (respHeaders) {
@@ -871,7 +877,7 @@ client.once("ready", async () => {
 
 	// Testa acesso à API antes de iniciar verificações
 	console.log("🔍 Testando acesso à API OpenDota...");
-	const testResult = await fetchPlayerMatches(1);
+	const testResult = await fetchPlayerMatches();
 
 	if (testResult.error) {
 		console.error("❌ API inacessível no startup.");
