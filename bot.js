@@ -189,6 +189,11 @@ async function fetchItemData() {
 	return { itemIds, items };
 }
 
+// Função para buscar game modes
+async function fetchGameModes() {
+	return safeFetchJson("https://api.opendota.com/api/constants/game_mode");
+}
+
 // Função para processar inventário
 function getReadableInventory(playerData, itemIds, items) {
 	const inventory = Object.fromEntries([
@@ -382,6 +387,7 @@ function getLowPriorityStatus(currentGameMode, previousGameMode) {
 async function createMatchEmbed(matchDetails, playerData, heroes) {
 	const hero = heroes[playerData.hero_id];
 	const { itemIds, items } = await fetchItemData();
+	const gameModes = await fetchGameModes();
 	const { invItems, backpackItems, quebrouItens } = getReadableInventory(
 		playerData,
 		itemIds,
@@ -393,6 +399,19 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 	const duration = new Date(matchDetails.duration * 1000)
 		.toISOString()
 		.slice(14, 19);
+
+	// Processa game mode
+	const gameModeData = gameModes[matchDetails.game_mode];
+	const gameModeName = gameModeData
+		? gameModeData.name
+				.split("_")
+				.slice(2)
+				.map((mode) => mode.charAt(0).toUpperCase() + mode.slice(1))
+				.join(" ")
+		: "Unknown";
+
+	// Define se é Ranked ou Casual
+	const lobbyType = matchDetails.lobby_type === 7 ? "Ranked" : "";
 
 	// Processa status de Low Priority
 	const currentGameMode = matchDetails.game_mode;
@@ -406,6 +425,11 @@ async function createMatchEmbed(matchDetails, playerData, heroes) {
 		.setTitle(`🎮 Nova Partida do Alda!`)
 		.setColor(won ? 0x00ff00 : 0xff0000)
 		.setURL(`https://www.opendota.com/matches/${matchDetails.match_id}`)
+		.addFields({
+			name: "🎯 Modo",
+			value: `${gameModeName}${(lobbyType ? "- ${lobbyType}" : lobbyType)}`,
+			inline: false,
+		})
 		.addFields(
 			{
 				name: "🏆 Resultado",
